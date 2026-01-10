@@ -19,7 +19,7 @@ pip install -r requirements.txt
 ```
 
 2. 設定環境變數：
-   - 複製 `.env.example` 為 `.env`
+   - 複製 `.env.example`(不小心刪掉了:3) 為 `.env`
    - 填入你的 Discord Bot Token 和 Uptime Kuma 資訊
 
 3. 執行機器人：

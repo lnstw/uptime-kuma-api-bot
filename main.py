@@ -264,13 +264,10 @@ async def status(interaction: discord.Interaction):
                         timestamp=discord.utils.utcnow()
                     )
                     for monitor in page_monitors:
-                        print(monitor)
                         status_emoji = "🟢" if (monitor.get('active') and not monitor.get('paused') and not monitor.get('maintenance')) else ("⏸️" if monitor.get('paused') else "🔴")
                         maintenance_tag = " 🔧" if monitor.get('maintenance') else ""
-                        
                         try:
                             beats = api.get_monitor_beats(monitor['id'], 24)
-                            print(beats)
                             if beats:
                                 up_time = sum(b.get('duration', 0) for b in beats if b.get('status') and str(b['status']) == 'MonitorStatus.UP')
                                 total_time = sum(b.get('duration', 0) for b in beats)

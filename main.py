@@ -1,5 +1,5 @@
 import discord
-from discord import app_commands
+from discord import app_commands, ui
 from uptime_kuma_api import UptimeKumaApi, MonitorType
 from typing import Optional
 from dotenv import load_dotenv
@@ -42,48 +42,6 @@ async def on_ready():
         await client.close()
         return
 
-@client.tree.command(name="status", description="查看所有監控器狀態")
-async def status(interaction: discord.Interaction):
-    await interaction.response.defer()
-    
-    try:
-        with UptimeKumaApi(KUMA_URL) as api:
-            api.login(KUMA_USERNAME, KUMA_PASSWORD)
-            monitors = api.get_monitors()
-            
-            if not monitors:
-                await interaction.followup.send("目前沒有任何監控器")
-                return
-            
-            embed = discord.Embed(
-                title="🔍 監控器狀態",
-                color=discord.Color.blue(),
-                timestamp=discord.utils.utcnow()
-            )
-            
-            for monitor in monitors:
-                status_emoji = "🟢" if monitor.get('active') else "🔴"
-                uptime = monitor.get('uptime', 0)
-                
-                value = f"URL: {monitor.get('url', 'N/A')}\n"
-                
-                # 改進顯示:如果是新監控器(uptime為0),顯示提示訊息
-                if uptime == 0:
-                    value += f"正常運行時間: {uptime}% ⏳ (數據收集中)"
-                else:
-                    value += f"正常運行時間: {uptime}%"
-                
-                embed.add_field(
-                    name=f"{status_emoji} {monitor['name']}",
-                    value=value,
-                    inline=False
-                )
-            
-            embed.set_footer(text="Uptime Kuma 監控系統")
-            await interaction.followup.send(embed=embed)
-            
-    except Exception as e:
-        await interaction.followup.send(f"❌ 錯誤：{str(e)}")
 
 @client.tree.command(name="add_monitor", description="新增一個網站監控")
 @app_commands.describe(
@@ -176,7 +134,7 @@ async def monitor_info(interaction: discord.Interaction, monitor_id: int):
             embed.add_field(name="URL", value=monitor.get('url', 'N/A'), inline=False)
             embed.add_field(name="間隔", value=f"{monitor['interval']}秒", inline=True)
             embed.add_field(name="狀態", value="🟢 啟用" if monitor['active'] else "🔴 停用", inline=True)
-            embed.add_field(name="正常運行時間", value=f"{monitor.get('uptime', 0)}%", inline=True)
+            embed.add_field(name="運作率(24h)", value=f"{monitor.get('uptime24', 0)}%", inline=True)
             
             await interaction.followup.send(embed=embed)
             
@@ -238,6 +196,131 @@ async def toggle_monitor(interaction: discord.Interaction, monitor_id: int, acti
     except Exception as e:
         await interaction.followup.send(f"❌ 操作失敗：{str(e)}")
 
+@client.tree.command(name="status", description="查看所有監控器統計 & 延遲信息")
+async def status(interaction: discord.Interaction):
+    await interaction.response.defer()
+    
+    try:
+        with UptimeKumaApi(KUMA_URL) as api:
+            api.login(KUMA_USERNAME, KUMA_PASSWORD)
+            monitors = api.get_monitors()
+            
+            if not monitors:
+                await interaction.followup.send("目前沒有任何監控器")
+                return
+            total = len(monitors)
+            enabled = sum(1 for m in monitors if m.get('active') and not m.get('paused') and not m.get('maintenance'))
+            paused = sum(1 for m in monitors if m.get('paused'))
+            maintenance = sum(1 for m in monitors if m.get('maintenance'))
+            offline = sum(1 for m in monitors if not m.get('active') and not m.get('paused') and not m.get('maintenance'))
+            embed_status = discord.Embed(
+                title="📊 監控統計",
+                color=discord.Color.gold(),
+                timestamp=discord.utils.utcnow()
+            )
+            
+            embed_status.add_field(name="共計監控器", value=str(total), inline=True)
+            embed_status.add_field(name="🟢 運行中", value=str(enabled), inline=True)
+            embed_status.add_field(name="⏸️ 暫停中", value=str(paused), inline=True)
+            embed_status.add_field(name="🔧 維護中", value=str(maintenance), inline=True)
+            embed_status.add_field(name="🔴 離線", value=str(offline), inline=True)
+            
+            # 計算平均24h運作率
+            uptimes = []
+            for m in monitors:
+                try:
+                    beats = api.get_monitor_beats(m['id'], 24)
+                    if beats:
+                        up_time = sum(b.get('duration', 0) for b in beats if b.get('status') and str(b['status']) == 'MonitorStatus.UP')
+                        total_time = sum(b.get('duration', 0) for b in beats)
+                        uptime_val = (up_time / total_time * 100) if total_time > 0 else 0
+                    else:
+                        uptime_val = 0
+                except:
+                    uptime_val = 0
+                uptimes.append(uptime_val)
+            avg_uptime = sum(uptimes) / len(uptimes) if uptimes else 0
+            embed_status.add_field(name="平均運作率(24h)", value=f"{avg_uptime:.2f}%", inline=True)  
+            await interaction.followup.send(embed=embed_status)
+            items_per_page = 5
+            total_pages = (len(monitors) + items_per_page - 1) // items_per_page
+            class MonitorPagination(ui.View):
+                def __init__(self):
+                    super().__init__()
+                    self.current_page = 0
+                    self.update_buttons()
+                
+                def update_buttons(self):
+                    self.previous_button.disabled = self.current_page == 0
+                    self.next_button.disabled = self.current_page == total_pages - 1
+                
+                def get_embed(self):
+                    start_idx = self.current_page * items_per_page
+                    end_idx = start_idx + items_per_page
+                    page_monitors = monitors[start_idx:end_idx]
+                    embed_list = discord.Embed(
+                        title="🔍 全部監控器 & 延遲",
+                        color=discord.Color.blue(),
+                        timestamp=discord.utils.utcnow()
+                    )
+                    for monitor in page_monitors:
+                        print(monitor)
+                        status_emoji = "🟢" if (monitor.get('active') and not monitor.get('paused') and not monitor.get('maintenance')) else ("⏸️" if monitor.get('paused') else "🔴")
+                        maintenance_tag = " 🔧" if monitor.get('maintenance') else ""
+                        
+                        try:
+                            beats = api.get_monitor_beats(monitor['id'], 24)
+                            print(beats)
+                            if beats:
+                                up_time = sum(b.get('duration', 0) for b in beats if b.get('status') and str(b['status']) == 'MonitorStatus.UP')
+                                total_time = sum(b.get('duration', 0) for b in beats)
+                                uptime_val = (up_time / total_time * 100) if total_time > 0 else 0
+                                latest_ping = beats[0].get('ping') if beats and beats[0].get('ping') is not None else None
+                                ping_str = f"{latest_ping:.1f}ms" if latest_ping is not None else "N/A"
+                            else:
+                                uptime_val = 0
+                                ping_str = "N/A"
+                        except:
+                            uptime_val = 0
+                            ping_str = "N/A"
+                        
+                        value = f"**狀態**: {status_emoji}\n"
+                        value += f"**運作率(24h)**: {uptime_val:.2f}%\n"
+                        value += f"**延遲**: {ping_str}{maintenance_tag}\n"
+                        if monitor.get('url'):
+                            value += f"**URL**: {monitor.get('url')}\n"
+                        if monitor.get('maintenance'):
+                            value += "⚠️ 維護中"
+                        embed_list.add_field(
+                            name=f"ID {monitor['id']}: {monitor['name']}",
+                            value=value.strip(),
+                            inline=False
+                        )
+                    embed_list.set_footer(text=f"頁面 {self.current_page + 1}/{total_pages}")
+                    return embed_list
+                
+                @ui.button(label="◀️ 上一頁", style=discord.ButtonStyle.primary)
+                async def previous_button(self, button: ui.Button, interaction: discord.Interaction):
+                    if self.current_page > 0:
+                        self.current_page -= 1
+                        self.update_buttons()
+                        embed = self.get_embed()
+                        await interaction.response.edit_message(embed=embed, view=self)
+                
+                @ui.button(label="下一頁 ▶️", style=discord.ButtonStyle.primary)
+                async def next_button(self, button: ui.Button, interaction: discord.Interaction):
+                    if self.current_page < total_pages - 1:
+                        self.current_page += 1
+                        self.update_buttons()
+                        embed = self.get_embed()
+                        await interaction.response.edit_message(embed=embed, view=self)
+            if total_pages > 0:
+                view = MonitorPagination()
+                embed = view.get_embed()
+                await interaction.followup.send(embed=embed, view=view)
+    except Exception as e:
+        await interaction.followup.send(f"❌ 錯誤：{str(e)}")
+
 @client.tree.command(name="help", description="顯示所有可用命令")
 async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -247,7 +330,7 @@ async def help_command(interaction: discord.Interaction):
     )
     
     commands_info = [
-        ("/status", "查看所有監控器狀態"),
+        ("/status", "查看統計 & 全部監控器延遲"),
         ("/list_monitors", "列出所有監控器(簡要)"),
         ("/monitor_info", "查看特定監控器詳情"),
         ("/add_monitor", "新增網站監控"),
